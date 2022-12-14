@@ -572,7 +572,7 @@ def main(args):
     unet.requires_grad_(False)
     unet_lora_params, _ = inject_trainable_lora(unet)
 
-    for _up, _down in extract_lora_ups_down(unet):
+    for _up, _down, _scale in extract_lora_ups_down(unet):
         print("Before training: Unet First Layer lora up", _up.weight.data)
         print("Before training: Unet First Layer lora down", _down.weight.data)
         break
