@@ -15,7 +15,7 @@ class LoraInjectedLinear(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias)
         self.lora_down = nn.Linear(in_features, 4, bias=False)
         self.lora_up = nn.Linear(4, out_features, bias=False)
-        self.scale = 1.0
+        self.scale = nn.Parameter(torch.tensor(1e-3))
 
         nn.init.normal_(self.lora_down.weight, std=1 / 16)
         nn.init.zeros_(self.lora_up.weight)
@@ -63,6 +63,7 @@ def inject_trainable_lora(
 
                     _module._modules[name].lora_up.weight.requires_grad = True
                     _module._modules[name].lora_down.weight.requires_grad = True
+                    _module._modules[name].scale.requires_grad = True
                     names.append(name)
 
     return require_grad_params, names
@@ -76,7 +77,7 @@ def extract_lora_ups_down(model, target_replace_module=["CrossAttention", "Atten
         if _module.__class__.__name__ in target_replace_module:
             for _child_module in _module.modules():
                 if _child_module.__class__.__name__ == "LoraInjectedLinear":
-                    loras.append((_child_module.lora_up, _child_module.lora_down))
+                    loras.append((_child_module.lora_up, _child_module.lora_down, _child_module.scale))
     if len(loras) == 0:
         raise ValueError("No lora injected.")
     return loras
@@ -86,20 +87,22 @@ def save_lora_weight(
     model, path="./lora.pt", target_replace_module=["CrossAttention", "Attention"]
 ):
     weights = []
-    for _up, _down in extract_lora_ups_down(
+    for _up, _down, _scale in extract_lora_ups_down(
         model, target_replace_module=target_replace_module
     ):
         weights.append(_up.weight)
         weights.append(_down.weight)
+        weights.append(_scale)
 
     torch.save(weights, path)
 
 
 def save_lora_as_json(model, path="./lora.json"):
     weights = []
-    for _up, _down in extract_lora_ups_down(model):
+    for _up, _down, _scale in extract_lora_ups_down(model):
         weights.append(_up.weight.detach().cpu().numpy().tolist())
         weights.append(_down.weight.detach().cpu().numpy().tolist())
+        weights.append(_scale.detach().cpu().numpy().tolist())
 
     import json
 
@@ -108,7 +111,7 @@ def save_lora_as_json(model, path="./lora.json"):
 
 
 def weight_apply_lora(
-    model, loras, target_replace_module=["CrossAttention", "Attention"], alpha=1.0
+    model, loras, target_replace_module=["CrossAttention", "Attention"]
 ):
 
     for _module in model.modules():
@@ -120,9 +123,10 @@ def weight_apply_lora(
 
                     up_weight = loras.pop(0).detach().to(weight.device)
                     down_weight = loras.pop(0).detach().to(weight.device)
+                    scale = loras.pop(0).detach().to(weight.device)
 
                     # W <- W + U * D
-                    weight = weight + alpha * (up_weight @ down_weight).type(
+                    weight = weight + scale * (up_weight @ down_weight).type(
                         weight.dtype
                     )
                     _child_module.weight = nn.Parameter(weight)
@@ -153,6 +157,7 @@ def monkeypatch_lora(
 
                     up_weight = loras.pop(0)
                     down_weight = loras.pop(0)
+                    scale = loras.pop(0)
 
                     _module._modules[name].lora_up.weight = nn.Parameter(
                         up_weight.type(weight.dtype)
@@ -160,6 +165,7 @@ def monkeypatch_lora(
                     _module._modules[name].lora_down.weight = nn.Parameter(
                         down_weight.type(weight.dtype)
                     )
+                    _module._modules[name].scale = nn.Parameter(scale.type(weight.dtype))
 
                     _module._modules[name].to(weight.device)
 
@@ -189,6 +195,7 @@ def monkeypatch_replace_lora(
 
                     up_weight = loras.pop(0)
                     down_weight = loras.pop(0)
+                    scale = loras.pop(0)
 
                     _module._modules[name].lora_up.weight = nn.Parameter(
                         up_weight.type(weight.dtype)
@@ -196,11 +203,12 @@ def monkeypatch_replace_lora(
                     _module._modules[name].lora_down.weight = nn.Parameter(
                         down_weight.type(weight.dtype)
                     )
+                    _module._modules[name].scale = nn.Parameter(scale.type(weight.dtype))
 
                     _module._modules[name].to(weight.device)
 
 
-def tune_lora_scale(model, alpha: float = 1.0):
-    for _module in model.modules():
-        if _module.__class__.__name__ == "LoraInjectedLinear":
-            _module.scale = alpha
+# def tune_lora_scale(model, alpha: float = 1.0):
+#     for _module in model.modules():
+#         if _module.__class__.__name__ == "LoraInjectedLinear":
+#             _module.scale = alpha
